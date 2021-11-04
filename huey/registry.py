@@ -2,7 +2,6 @@ from collections import namedtuple
 
 from huey.exceptions import HueyException
 
-
 Message = namedtuple('Message', ('id', 'name', 'eta', 'retries', 'retry_delay',
                                  'priority', 'args', 'kwargs', 'on_complete',
                                  'on_error', 'expires', 'expires_resolved'))
@@ -84,9 +83,7 @@ class Registry(object):
         # Compatibility with Huey 1.11 message format.
         if not isinstance(message, Message) and isinstance(message, tuple):
             tid, name, eta, retries, retry_delay, (args, kwargs), oc = message
-            message = Message(tid, name, eta, retries, retry_delay, None, args,
-                              kwargs, oc, None)
-
+            message = Message(tid, name, eta, retries, retry_delay, None, args, kwargs, oc, None)
         TaskClass = self.string_to_task(message.name)
 
         on_complete = None

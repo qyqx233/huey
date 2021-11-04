@@ -8,6 +8,9 @@ import json
 import os
 import re
 import shutil
+
+import aioredis
+
 try:
     import sqlite3
 except ImportError:
@@ -19,6 +22,7 @@ import warnings
 
 try:
     from redis import ConnectionPool
+
     try:
         from redis import StrictRedis as Redis
     except ImportError:
@@ -243,21 +247,37 @@ class BaseStorage(object):
 
 class BlackHoleStorage(BaseStorage):
     def enqueue(self, data, priority=None): pass
+
     def dequeue(self): pass
+
     def queue_size(self): return 0
+
     def enqueued_items(self, limit=None): return []
+
     def flush_queue(self): pass
+
     def add_to_schedule(self, data, ts, utc): pass
+
     def read_schedule(self, ts): return []
+
     def schedule_size(self): return 0
+
     def scheduled_items(self, limit=None): return []
+
     def flush_schedule(self): pass
+
     def put_data(self, key, value, is_result=False): pass
+
     def peek_data(self, key): return EmptyData
+
     def pop_data(self, key): return EmptyData
+
     def has_data_for_key(self, key): return False
+
     def result_store_size(self): return 0
+
     def result_items(self): return {}
+
     def flush_results(self): pass
 
 
@@ -363,9 +383,9 @@ class RedisStorage(BaseStorage):
     redis_client = Redis
 
     def __init__(self, name='huey', blocking=True, read_timeout=1,
-                 connection_pool=None, url=None, client_name=None,
-                 **connection_params):
+                 connection_pool=None, url=None, client_name=None, **connection_params):
 
+        use_async = True if os.environ.get("HUEY_ASYNC") == "1" else False
         if Redis is None:
             raise ConfigurationError('"redis" python module not found, cannot '
                                      'use Redis storage backend. Run "pip '
@@ -388,10 +408,13 @@ class RedisStorage(BaseStorage):
         elif connection_pool is None:
             connection_pool = ConnectionPool(**connection_params)
 
-        self.pool = connection_pool
-        self.conn = self.redis_client(connection_pool=connection_pool)
+        if not use_async:
+            self.pool = connection_pool
+            self.conn = self.redis_client(connection_pool=connection_pool)
+            self._pop = self.conn.register_script(SCHEDULE_POP_LUA)
+        else:
+            self.conn = aioredis.from_url(url)
         self.connection_params = connection_params
-        self._pop = self.conn.register_script(SCHEDULE_POP_LUA)
 
         self.name = self.clean_name(name)
         self.queue_key = 'huey.redis.%s' % self.name
@@ -404,11 +427,14 @@ class RedisStorage(BaseStorage):
 
         self.blocking = blocking
         self.read_timeout = read_timeout
+        BaseStorage.__init__(self, name)
 
-    def clean_name(self, name):
+    @staticmethod
+    def clean_name(name):
         return re.sub('[^a-z0-9]', '', name)
 
-    def convert_ts(self, ts):
+    @staticmethod
+    def convert_ts(ts):
         return time.mktime(ts.timetuple()) + (ts.microsecond * 1e-6)
 
     def enqueue(self, data, priority=None):
@@ -416,6 +442,12 @@ class RedisStorage(BaseStorage):
             raise NotImplementedError('Task priorities are not supported by '
                                       'this storage.')
         self.conn.lpush(self.queue_key, data)
+
+    async def async_enqueue(self, data, priority=None):
+        if priority:
+            raise NotImplementedError('Task priorities are not supported by '
+                                      'this storage.')
+        await self.conn.lpush(self.queue_key, data)
 
     def dequeue(self):
         if self.blocking:
@@ -430,8 +462,24 @@ class RedisStorage(BaseStorage):
         else:
             return self.conn.rpop(self.queue_key)
 
+    async def async_dequeue(self):
+        if self.blocking:
+            try:
+                return await self.conn.brpop(
+                    self.queue_key,
+                    timeout=self.read_timeout)[1]
+            except (ConnectionError, TypeError, IndexError):
+                # Unfortunately, there is no way to differentiate a socket
+                # timing out and a host being unreachable.
+                return None
+        else:
+            return await self.conn.rpop(self.queue_key)
+
     def queue_size(self):
         return self.conn.llen(self.queue_key)
+
+    async def async_queue_size(self):
+        return await self.conn.llen(self.queue_key)
 
     def enqueued_items(self, limit=None):
         limit = limit or -1
@@ -463,11 +511,21 @@ class RedisStorage(BaseStorage):
     def put_data(self, key, value, is_result=False):
         self.conn.hset(self.result_key, key, value)
 
+    async def async_put_data(self, key, value, is_result=False):
+        await self.conn.hset(self.result_key, key, value)
+
     def peek_data(self, key):
         pipe = self.conn.pipeline()
         pipe.hexists(self.result_key, key)
         pipe.hget(self.result_key, key)
         exists, val = pipe.execute()
+        return EmptyData if not exists else val
+
+    async def async_peek_data(self, key):
+        pipe = await self.conn.pipeline()
+        pipe.hexists(self.result_key, key)
+        pipe.hget(self.result_key, key)
+        exists, val = await pipe.execute()
         return EmptyData if not exists else val
 
     def pop_data(self, key):
@@ -478,20 +536,43 @@ class RedisStorage(BaseStorage):
         exists, val, n = pipe.execute()
         return EmptyData if not exists else val
 
+    async def async_pop_data(self, key):
+        pipe = await self.conn.pipeline()
+        pipe.hexists(self.result_key, key)
+        pipe.hget(self.result_key, key)
+        pipe.hdel(self.result_key, key)
+        exists, val, n = await pipe.execute()
+        return EmptyData if not exists else val
+
     def has_data_for_key(self, key):
         return self.conn.hexists(self.result_key, key)
+
+    async def async_has_data_for_key(self, key):
+        return await self.conn.hexists(self.result_key, key)
 
     def put_if_empty(self, key, value):
         return self.conn.hsetnx(self.result_key, key, value)
 
+    async def async_put_if_empty(self, key, value):
+        return await self.conn.hsetnx(self.result_key, key, value)
+
     def result_store_size(self):
         return self.conn.hlen(self.result_key)
+
+    async def async_result_store_size(self):
+        return await self.conn.hlen(self.result_key)
 
     def result_items(self):
         return self.conn.hgetall(self.result_key)
 
+    async def async_result_items(self):
+        return await self.conn.hgetall(self.result_key)
+
     def flush_results(self):
         self.conn.delete(self.result_key)
+
+    async def async_flush_results(self):
+        await self.conn.delete(self.result_key)
 
 
 class RedisExpireStorage(RedisStorage):
@@ -607,13 +688,18 @@ class _ConnectionState(object):
     def __init__(self, **kwargs):
         super(_ConnectionState, self).__init__(**kwargs)
         self.reset()
+
     def reset(self):
         self.conn = None
         self.closed = True
+
     def set_connection(self, conn):
         self.conn = conn
         self.closed = False
+
+
 class _ConnectionLocal(_ConnectionState, threading.local): pass
+
 
 # Python 2.x may return <buffer> object for BLOB columns.
 to_bytes = lambda b: bytes(b) if not isinstance(b, bytes) else b

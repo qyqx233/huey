@@ -1,6 +1,7 @@
 import datetime
 import inspect
 import logging
+import os
 import re
 import time
 import traceback
@@ -37,7 +38,6 @@ from huey.utils import reraise_as
 from huey.utils import string_type
 from huey.utils import time_clock
 from huey.utils import to_timestamp
-
 
 logger = logging.getLogger('huey')
 
@@ -84,7 +84,7 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, always_eager=None,
-                 storage_class=None, **storage_kwargs):
+                 storage_class=None, use_async=False, **storage_kwargs):
         if always_eager is not None:
             warnings.warn('"always_eager" parameter is deprecated, use '
                           '"immediate" instead', DeprecationWarning)
@@ -122,7 +122,7 @@ class Huey(object):
         self._signal = S.Signal()
         self._tasks_in_flight = set()
 
-    def create_storage(self):
+    def create_storage(self, ):
         # When using immediate mode, the default behavior is to use an
         # in-memory broker rather than a live one like Redis or Sqlite, however
         # this can be overridden by specifying "immediate_use_memory=False"
@@ -139,9 +139,9 @@ class Huey(object):
         if self.storage_class is None:
             warnings.warn('storage_class not specified when initializing '
                           'huey, will default to RedisStorage.')
-            Storage = RedisStorage
+            Storage = RedisStorage  # noqa
         else:
-            Storage = self.storage_class
+            Storage = self.storage_class  # noqa
         return Storage(self.name, **kwargs)
 
     @property
@@ -160,8 +160,8 @@ class Huey(object):
     def create_consumer(self, **options):
         return Consumer(self, **options)
 
-    def task(self, retries=0, retry_delay=0, priority=None, context=False,
-             name=None, expires=None, **kwargs):
+    def async_task(self, retries=0, retry_delay=0, priority=None, context=False,
+                   name=None, expires=None, **kwargs):
         def decorator(func):
             return TaskWrapper(
                 self,
@@ -173,6 +173,36 @@ class Huey(object):
                 default_priority=priority,
                 default_expires=expires,
                 **kwargs)
+
+        return decorator
+
+    def task(self, retries=0, retry_delay=0, priority=None, context=False,
+             name=None, expires=None, **kwargs):
+        if os.environ.get("HUEY_ASYNC") == "1":
+            def decorator(func):
+                return TaskWrapper(
+                    self,
+                    func.func if isinstance(func, TaskWrapper) else func,
+                    context=context,
+                    name=name,
+                    default_retries=retries,
+                    default_retry_delay=retry_delay,
+                    default_priority=priority,
+                    default_expires=expires,
+                    **kwargs)
+        else:
+            def decorator(func):
+                return TaskWrapper(
+                    self,
+                    func.func if isinstance(func, TaskWrapper) else func,
+                    context=context,
+                    name=name,
+                    default_retries=retries,
+                    default_retry_delay=retry_delay,
+                    default_priority=priority,
+                    default_expires=expires,
+                    **kwargs)
+
         return decorator
 
     def periodic_task(self, validate_datetime, retries=0, retry_delay=0,
@@ -206,15 +236,19 @@ class Huey(object):
                         return fn(ctx, *a, **k)
                     else:
                         return fn(*a, **k)
+
             return inner
+
         def task_decorator(func):
             return self.task(**kwargs)(context_decorator(func))
+
         return task_decorator
 
     def pre_execute(self, name=None):
         def decorator(fn):
             self._pre_execute[name or fn.__name__] = fn
             return fn
+
         return decorator
 
     def unregister_pre_execute(self, name):
@@ -227,6 +261,7 @@ class Huey(object):
         def decorator(fn):
             self._post_execute[name or fn.__name__] = fn
             return fn
+
         return decorator
 
     def unregister_post_execute(self, name):
@@ -239,6 +274,7 @@ class Huey(object):
         def decorator(fn):
             self._startup[name or fn.__name__] = fn
             return fn
+
         return decorator
 
     def unregister_on_startup(self, name):
@@ -251,6 +287,7 @@ class Huey(object):
         def decorator(fn):
             self._shutdown[name or fn.__name__] = fn
             return fn
+
         return decorator
 
     def unregister_on_shutdown(self, name=None):
@@ -268,6 +305,7 @@ class Huey(object):
         def decorator(fn):
             self._signal.connect(fn, *signals)
             return fn
+
         return decorator
 
     def disconnect_signal(self, receiver, *signals):
@@ -286,6 +324,29 @@ class Huey(object):
     def deserialize_task(self, data):
         message = self.serializer.deserialize(data)
         return self._registry.create_task(message)
+
+    async def async_enqueue(self, task):
+        # Resolve the expiration time when the task is enqueued.
+        if task.expires:
+            task.resolve_expires(self.utc)
+
+        if self._immediate:
+            self.execute(task)
+        else:
+            await self.storage.async_enqueue(self.serialize_task(task), task.priority)
+
+        if not self.results:
+            return
+
+        if task.on_complete:
+            current = task
+            results = []
+            while current is not None:
+                results.append(Result(self, current))
+                current = current.on_complete
+            return ResultGroup(results)
+        else:
+            return Result(self, task)
 
     def enqueue(self, task):
         # Resolve the expiration time when the task is enqueued.
@@ -315,8 +376,16 @@ class Huey(object):
         if data is not None:
             return self.deserialize_task(data)
 
+    async def async_dequeue(self):
+        data = await self.storage.dequeue()
+        if data is not None:
+            return self.deserialize_task(data)
+
     def put(self, key, data):
         return self.storage.put_data(key, self.serializer.serialize(data))
+
+    async def async_put(self, key, data):
+        return await self.storage.async_put_data(key, self.serializer.serialize(data))
 
     def put_result(self, key, data):
         return self.storage.put_data(key, self.serializer.serialize(data),
@@ -324,6 +393,12 @@ class Huey(object):
 
     def put_if_empty(self, key, data):
         return self.storage.put_if_empty(key, self.serializer.serialize(data))
+
+    async def async_get_raw(self, key, peek=False):
+        if peek:
+            return await self.storage.async_peek_data(key)
+        else:
+            return await self.storage.async_pop_data(key)
 
     def get_raw(self, key, peek=False):
         if peek:
@@ -633,9 +708,9 @@ class Task(object):
         self.eta = eta
         self.retries = retries if retries is not None else self.default_retries
         self.retry_delay = retry_delay if retry_delay is not None else \
-                self.default_retry_delay
+            self.default_retry_delay
         self.priority = priority if priority is not None else \
-                self.default_priority
+            self.default_priority
         self.expires = expires if expires is not None else self.default_expires
         self.expires_resolved = expires_resolved
 
@@ -723,14 +798,130 @@ class Task(object):
             return False
 
         return (
-            self.id == rhs.id and
-            self.eta == rhs.eta and
-            type(self) == type(rhs))
+                self.id == rhs.id and
+                self.eta == rhs.eta and
+                type(self) == type(rhs))
 
 
 class PeriodicTask(Task):
     def validate_datetime(self, timestamp):
         return False
+
+
+class RPCWrapper(object):
+    def __init__(self, huey, func, retries=None, retry_delay=None,
+                 context=False, name=None, task_base=None, **settings):
+        self.__doc__ = getattr(func, '__doc__', None)
+        self.huey = huey
+        self.func = func
+        self.retries = retries
+        self.retry_delay = retry_delay
+        self.context = context
+        self.name = name
+        self.settings = settings
+
+    def __call__(self, *args, **kwargs):
+        return self.huey.enqueue(self.s(*args, **kwargs))
+
+
+class AsyncTaskWrapper(object):
+    task_base = Task
+
+    def __init__(self, huey: "Huey", func, retries=None, retry_delay=None,
+                 context=False, name=None, task_base=None, **settings):
+        self.__doc__ = getattr(func, '__doc__', None)
+        self.huey = huey
+        self.func = func
+        self.retries = retries
+        self.retry_delay = retry_delay
+        self.context = context
+        self.name = name
+        self.settings = settings
+        if task_base is not None:
+            self.task_base = task_base
+
+        # Dynamically create task class and register with Huey instance.
+        self.task_class = self.create_task(func, context, name, **settings)
+        self.huey._registry.register(self.task_class)
+
+    def unregister(self):
+        return self.huey._registry.unregister(self.task_class)
+
+    def create_task(self, func, context=False, name=None, **settings):
+        def execute(self):
+            args, kwargs = self.data
+            if self.context:
+                kwargs['task'] = self
+            return func(*args, **kwargs)
+
+        attrs = {
+            'context': context,
+            'execute': execute,
+            '__module__': func.__module__,
+            '__doc__': func.__doc__}
+        attrs.update(settings)
+
+        if not name:
+            name = func.__name__
+
+        return type(name, (self.task_base,), attrs)
+
+    def is_revoked(self, timestamp=None, peek=True):
+        return self.huey.is_revoked(self.task_class, timestamp, peek)
+
+    def revoke(self, revoke_until=None, revoke_once=False):
+        self.huey.revoke_all(self.task_class, revoke_until, revoke_once)
+
+    def restore(self):
+        return self.huey.restore_all(self.task_class)
+
+    def schedule(self, args=None, kwargs=None, eta=None, delay=None,
+                 priority=None, retries=None, retry_delay=None, expires=None,
+                 id=None):
+        if eta is None and delay is None:
+            if isinstance(args, (int, float)):
+                delay = args
+            elif isinstance(args, datetime.timedelta):
+                delay = args.total_seconds()
+            elif isinstance(args, datetime.datetime):
+                eta = args
+            else:
+                raise ValueError('schedule() missing required eta= or delay=')
+            args = None
+
+        if kwargs is not None and not isinstance(kwargs, dict):
+            raise ValueError('schedule() kwargs argument must be a dict.')
+
+        eta = normalize_time(eta, delay, self.huey.utc)
+        task = self.task_class(
+            args or (),
+            kwargs or {},
+            id=id,
+            eta=eta,
+            retries=retries,
+            retry_delay=retry_delay,
+            priority=priority,
+            expires=expires)
+        return self.huey.enqueue(task)
+
+    def _apply(self, it):
+        return [self.s(*(i if isinstance(i, tuple) else (i,))) for i in it]
+
+    def map(self, it):
+        return ResultGroup([self.huey.enqueue(t) for t in self._apply(it)])
+
+    async def __call__(self, *args, **kwargs):
+        return await self.huey.enqueue(self.s(*args, **kwargs))
+
+    def call_local(self, *args, **kwargs):
+        return self.func(*args, **kwargs)
+
+    def s(self, *args, **kwargs):
+        return self.task_class(args, kwargs,
+                               retries=kwargs.pop('retries', None),
+                               retry_delay=kwargs.pop('retry_delay', None),
+                               priority=kwargs.pop('priority', None),
+                               expires=kwargs.pop('expires', None))
 
 
 class TaskWrapper(object):
@@ -819,8 +1010,12 @@ class TaskWrapper(object):
     def map(self, it):
         return ResultGroup([self.huey.enqueue(t) for t in self._apply(it)])
 
-    def __call__(self, *args, **kwargs):
-        return self.huey.enqueue(self.s(*args, **kwargs))
+    if os.environ.get("HUEY_ASYNC") == "1":
+        async def __call__(self, *args, **kwargs):
+            return await self.huey.async_enqueue(self.s(*args, **kwargs))
+    else:
+        def __call__(self, *args, **kwargs):
+            return self.huey.enqueue(self.s(*args, **kwargs))
 
     def call_local(self, *args, **kwargs):
         return self.func(*args, **kwargs)
@@ -838,6 +1033,7 @@ class TaskLock(object):
     Utilize the Storage key/value APIs to implement simple locking. For more
     details see :py:meth:`Huey.lock_task`.
     """
+
     def __init__(self, huey, name):
         self._huey = huey
         self._name = name
@@ -849,6 +1045,7 @@ class TaskLock(object):
         def inner(*args, **kwargs):
             with self:
                 return fn(*args, **kwargs)
+
         return inner
 
     def __enter__(self):
@@ -885,6 +1082,7 @@ class Result(object):
         result2 = my_task(2, 3)
         print result(blocking=True, timeout=4)
     """
+
     def __init__(self, huey, task):
         self.huey = huey
         self.task = task
@@ -900,6 +1098,19 @@ class Result(object):
     def __call__(self, *args, **kwargs):
         return self.get(*args, **kwargs)
 
+    async def _async_get(self, preserve=False):
+        task_id = self.id
+        if self._result is EmptyData:
+            res = await self.huey.async_get_raw(task_id, peek=preserve)
+
+            if res is not EmptyData:
+                self._result = self.huey.serializer.deserialize(res)
+                return self._result
+            else:
+                return res
+        else:
+            return self._result
+
     def _get(self, preserve=False):
         task_id = self.id
         if self._result is EmptyData:
@@ -911,6 +1122,28 @@ class Result(object):
             else:
                 return res
         else:
+            return self._result
+
+    async def async_get_raw_result(self, blocking=False, timeout=None, backoff=1.15,
+                                   max_delay=1.0, revoke_on_timeout=False, preserve=False):
+        if not blocking:
+            res = await self._async_get(preserve)
+            if res is not EmptyData:
+                return res
+        else:
+            start = time_clock()
+            delay = .1
+            while self._result is EmptyData:
+                if timeout and time_clock() - start >= timeout:
+                    if revoke_on_timeout:
+                        self.revoke()
+                    raise HueyException('timed out waiting for result')
+                if delay > max_delay:
+                    delay = max_delay
+                if self._async_get(preserve) is EmptyData:
+                    time.sleep(delay)
+                    delay *= backoff
+
             return self._result
 
     def get_raw_result(self, blocking=False, timeout=None, backoff=1.15,
@@ -935,12 +1168,19 @@ class Result(object):
 
             return self._result
 
+    async def async_get(self, blocking=False, timeout=None, backoff=1.15, max_delay=1.0,
+                        revoke_on_timeout=False, preserve=False):
+        result = await self.async_get_raw_result(blocking, timeout, backoff, max_delay, revoke_on_timeout, preserve)
+        if result is not None and isinstance(result, Error):
+            raise TaskException(result.metadata)
+        return result
+
     def get(self, blocking=False, timeout=None, backoff=1.15, max_delay=1.0,
             revoke_on_timeout=False, preserve=False):
         result = self.get_raw_result(blocking, timeout, backoff, max_delay,
                                      revoke_on_timeout, preserve)
         if result is not None and isinstance(result, Error):
-            raise TaskException(result.metadata)
+            raise TaskException(result.metadata)  # noqa
         return result
 
     def is_revoked(self):
@@ -979,12 +1219,15 @@ class ResultGroup(object):
 
     def get(self, *args, **kwargs):
         return [result.get(*args, **kwargs) for result in self._results]
+
     __call__ = get
 
     def __getitem__(self, idx):
         return self._results[idx].get(True)
+
     def __iter__(self):
         return iter(self._results)
+
     def __len__(self):
         return len(self._results)
 
@@ -1014,7 +1257,7 @@ def crontab(minute='*', hour='*', day='*', month='*', day_of_week='*', strict=Fa
     validation = (
         ('m', month, range(1, 13)),
         ('d', day, range(1, 32)),
-        ('w', day_of_week, range(8)), # 0-6, but also 7 for Sunday.
+        ('w', day_of_week, range(8)),  # 0-6, but also 7 for Sunday.
         ('H', hour, range(24)),
         ('M', minute, range(60))
     )
@@ -1087,6 +1330,7 @@ def _unsupported(name, library):
         def __init__(self, *args, **kwargs):
             raise ConfigurationError('Cannot initialize "%s", %s module not '
                                      'installed.' % (name, library))
+
     return UnsupportedHuey
 
 
@@ -1094,23 +1338,30 @@ def _unsupported(name, library):
 class BlackHoleHuey(Huey):
     storage_class = BlackHoleStorage
 
+
 class MemoryHuey(Huey):
     storage_class = MemoryStorage
+
 
 class SqliteHuey(Huey):
     storage_class = SqliteStorage
 
+
 class RedisHuey(Huey):
     storage_class = RedisStorage
+
 
 class RedisExpireHuey(Huey):
     storage_class = RedisExpireStorage
 
+
 class PriorityRedisHuey(Huey):
     storage_class = PriorityRedisStorage
 
+
 class PriorityRedisExpireHuey(Huey):
     storage_class = PriorityRedisExpireStorage
+
 
 class FileHuey(Huey):
     storage_class = FileStorage

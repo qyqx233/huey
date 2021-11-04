@@ -1,16 +1,16 @@
 from collections import namedtuple
 import calendar
 import datetime
-import errno
+import os
 import os
 import sys
 import time
 import warnings
+
 try:
     import fcntl
 except ImportError:
     fcntl = None
-
 
 Error = namedtuple('Error', ('metadata',))
 
@@ -20,12 +20,17 @@ class UTC(datetime.tzinfo):
 
     def __repr__(self):
         return "<UTC>"
+
     def utcoffset(self, dt):
         return self.zero
+
     def tzname(self, dt):
         return "UTC"
+
     def dst(self, dt):
         return self.zero
+
+
 _UTC = UTC()
 
 
@@ -107,11 +112,15 @@ def normalize_time(eta=None, delay=None, utc=True):
 if sys.version_info[0] == 2:
     string_type = basestring
     text_type = unicode
+
+
     def to_timestamp(dt):
         return time.mktime(dt.timetuple())
 else:
     string_type = (bytes, str)
     text_type = str
+
+
     def to_timestamp(dt):
         return dt.timestamp()
 

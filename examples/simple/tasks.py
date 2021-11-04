@@ -1,9 +1,11 @@
 import os
+
+# os.environ["HUEY_ASYNC"] = "1"
 import threading
 import time
-from huey import crontab
+from huey import crontab, RedisHuey
 
-from config import huey
+huey = RedisHuey('simple.test', blocking=True, url="redis://192.168.50.76", )
 
 
 def tprint(s, c=32):
@@ -16,6 +18,7 @@ def tprint(s, c=32):
 
 @huey.task()
 def add(a, b):
+    print(f"a={a}, b={b}")
     return a + b
 
 
