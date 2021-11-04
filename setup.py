@@ -1,13 +1,12 @@
 import os
 from setuptools import setup, find_packages
 
-
 with open(os.path.join(os.path.dirname(__file__), 'README.rst')) as fh:
     readme = fh.read()
 
 extras_require = {
     'backends': ['redis>=3.0.0'],
-    'redis': ['redis>=3.0.0'],
+    'redis': ['redis>=3.0.0', 'aioredis>=2.0.0'],
 }
 
 setup(
