@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import inspect
 import logging
@@ -1140,8 +1141,8 @@ class Result(object):
                     raise HueyException('timed out waiting for result')
                 if delay > max_delay:
                     delay = max_delay
-                if self._async_get(preserve) is EmptyData:
-                    time.sleep(delay)
+                if await self._async_get(preserve) is EmptyData:
+                    await asyncio.sleep(delay)
                     delay *= backoff
 
             return self._result
@@ -1172,7 +1173,7 @@ class Result(object):
                         revoke_on_timeout=False, preserve=False):
         result = await self.async_get_raw_result(blocking, timeout, backoff, max_delay, revoke_on_timeout, preserve)
         if result is not None and isinstance(result, Error):
-            raise TaskException(result.metadata)
+            raise TaskException(result.metadata)  # noqa
         return result
 
     def get(self, blocking=False, timeout=None, backoff=1.15, max_delay=1.0,
