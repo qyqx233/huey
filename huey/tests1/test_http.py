@@ -79,7 +79,15 @@ def test_add():
     asyncio.get_event_loop().run_until_complete(fx())
 
 
-rpc = JSONRpc(HTTPComm("192.168.50.76", 3212))
+def throw_non_200(j):
+    code = j["code"]
+    if code != 200:
+        raise Exception(j["msg"])
+    logger.debug(j)
+    return j["data"]
+
+
+rpc = JSONRpc(HTTPComm("192.168.50.76", 3212), post_hook=throw_non_200)
 
 
 def no_arg():
@@ -93,7 +101,7 @@ def ff(name: str, args: List[str]):
 
 def test_send():
     async def fx():
-        await ff("ls", ["/"])
+        logger.debug(await ff("ls", ["/"]))
         # logger.debug(inspect.signature(no_arg).__class__)
         pass
 

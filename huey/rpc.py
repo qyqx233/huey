@@ -84,17 +84,22 @@ class Rpc:
     serializer: Serializer
     comm: Comm
 
-    def __init__(self):
-        pass
+    def __init__(self, pre_hook=None, post_hook=None):
+        self.post_hook = post_hook
+        self.pre_hook = pre_hook
 
     # def serialize(self, obj):
     #     return self.serializer.serialize(obj)
 
-    async def request(self, endpoint, obj, t: Any):
+    async def request(self, endpoint, request, t: Any):
         serializer = self.serializer
-        req_data = serializer.serialize(obj)
+        if self.pre_hook:
+            self.pre_hook(request)
+        req_data = serializer.serialize(request)
         rsp_data = await self.comm.exchange(endpoint, req_data)
-        return serializer.deserialize(rsp_data, t)
+        response = serializer.deserialize(rsp_data, t)
+        r = self.post_hook(response)
+        return r
 
     def call_wrapper(self, endpoint, response_class: Any = None):
         that = self
@@ -114,10 +119,11 @@ class Rpc:
 
 
 class JSONRpc(Rpc):
-    def __init__(self, comm):
-        Rpc.__init__(self)
+    def __init__(self, comm, pre_hook=None, post_hook=None):
+        Rpc.__init__(self, pre_hook, post_hook)
         self.serializer = JSONSerializer()
         self.comm = comm
+        self.post_hook = post_hook
 
 
 class PydanticRpc(Rpc):
