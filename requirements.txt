@@ -1,0 +1,9 @@
+huey~=2.4.1
+redis~=3.5.3
+aiohttp~=3.7.4.post0
+gevent~=21.8.0
+aioredis~=2.0.0
+loguru~=0.5.3
+Flask~=2.0.1
+setuptools~=56.0.0
+pydantic~=1.8.2
