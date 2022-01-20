@@ -93,9 +93,7 @@ class Rpc:
     async def request(self, endpoint, obj, t: Any):
         serializer = self.serializer
         req_data = serializer.serialize(obj)
-        logger.debug("req_data={}", req_data)
         rsp_data = await self.comm.exchange(endpoint, req_data)
-        logger.debug(rsp_data)
         return serializer.deserialize(rsp_data, t)
 
     def call_wrapper(self, endpoint, response_class: Any = None):
