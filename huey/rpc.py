@@ -38,7 +38,7 @@ class HTTPComm(Comm):
         self.host_port = f"http://{host}:{port}"  # noqa
 
     async def exchange(self, endpoint: str, data: bytes) -> bytes:
-        async with aiohttp.ClientSession(connector=self.conn) as session:
+        async with aiohttp.ClientSession() as session:
             target = f"{self.host_port}{endpoint}"
             async with session.post(target, data=data) as r:
                 if r._body is None:  # noqa
