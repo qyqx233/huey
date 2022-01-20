@@ -84,22 +84,28 @@ class Rpc:
     serializer: Serializer
     comm: Comm
 
-    def __init__(self, pre_hook=None, post_hook=None):
+    def __init__(self, pre_hook=None, post_hook=None, error_log=True):
         self.post_hook = post_hook
         self.pre_hook = pre_hook
+        self.error_log = error_log
 
     # def serialize(self, obj):
     #     return self.serializer.serialize(obj)
 
     async def request(self, endpoint, request, t: Any):
         serializer = self.serializer
-        if self.pre_hook:
-            self.pre_hook(request)
-        req_data = serializer.serialize(request)
-        rsp_data = await self.comm.exchange(endpoint, req_data)
-        response = serializer.deserialize(rsp_data, t)
-        r = self.post_hook(response)
-        return r
+        rsp_data = b''
+        try:
+            if self.pre_hook:
+                self.pre_hook(request)
+            req_data = serializer.serialize(request)
+            rsp_data = await self.comm.exchange(endpoint, req_data)
+            response = serializer.deserialize(rsp_data, t)
+            r = self.post_hook(response)
+            return r
+        except Exception as e:
+            logger.error(f"error: {e}, rsp_data={rsp_data}")
+            raise e
 
     def call_wrapper(self, endpoint, response_class: Any = None):
         that = self
@@ -119,11 +125,12 @@ class Rpc:
 
 
 class JSONRpc(Rpc):
-    def __init__(self, comm, pre_hook=None, post_hook=None):
-        Rpc.__init__(self, pre_hook, post_hook)
+    def __init__(self, comm, pre_hook=None, post_hook=None, error_log=True):
+        Rpc.__init__(self, pre_hook, post_hook, error_log)
         self.serializer = JSONSerializer()
         self.comm = comm
         self.post_hook = post_hook
+        self.error_log = error_log
 
 
 class PydanticRpc(Rpc):
