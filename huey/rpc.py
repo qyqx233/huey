@@ -84,10 +84,11 @@ class Rpc:
     serializer: Serializer
     comm: Comm
 
-    def __init__(self, pre_hook=None, post_hook=None, error_log=True):
+    def __init__(self, pre_hook=None, post_hook=None, error_log=True, debug_request=False):
         self.post_hook = post_hook
         self.pre_hook = pre_hook
         self.error_log = error_log
+        self.debug_request = debug_request
 
     # def serialize(self, obj):
     #     return self.serializer.serialize(obj)
@@ -95,6 +96,8 @@ class Rpc:
     async def request(self, endpoint, request, t: Any):
         serializer = self.serializer
         rsp_data = b''
+        if self.debug_request:
+            logger.debug(request)
         try:
             if self.pre_hook:
                 self.pre_hook(request)
@@ -125,12 +128,11 @@ class Rpc:
 
 
 class JSONRpc(Rpc):
-    def __init__(self, comm, pre_hook=None, post_hook=None, error_log=True):
-        Rpc.__init__(self, pre_hook, post_hook, error_log)
+    def __init__(self, comm, pre_hook=None, post_hook=None, error_log=True, debug_request=False):
+        Rpc.__init__(self, pre_hook, post_hook, error_log, debug_request)
         self.serializer = JSONSerializer()
         self.comm = comm
         self.post_hook = post_hook
-        self.error_log = error_log
 
 
 class PydanticRpc(Rpc):
