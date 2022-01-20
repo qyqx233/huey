@@ -116,12 +116,21 @@ class Rpc:
         class Deco:
             def __init__(self, fn):
                 self.sig = inspect.signature(fn)
-                print(self.sig)
+                defaults = {}
+                for k, v in self.sig.parameters.items():
+                    if v.default is not inspect.Signature.empty:
+                        defaults[k] = v.default
+                self.names = list(self.sig.parameters)
+                self.defaults = defaults
                 self.fn = fn
                 self.rpc = that
 
             async def __call__(self, *args):
-                req = {k: v for k, v in zip(self.sig.parameters, args)}
+                if self.defaults:
+                    req = self.defaults.copy()
+                    req.update({k: v for k, v in zip(self.names[:len(args)], args)})
+                else:
+                    req = {k: v for k, v in zip(self.sig.parameters, args)}
                 return await self.rpc.request(endpoint, req, response_class)
 
         return Deco
